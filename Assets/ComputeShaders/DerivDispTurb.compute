@@ -1,0 +1,24 @@
+﻿#pragma kernel FillResultTextures
+
+RWTexture2D<float3> Disp;
+RWTexture2D<float4> Deriv, Turb;
+
+Texture2D<float2> Dxdz, DyDxz, DyxDyz, DxxDzz;
+
+float Lambda;
+float DeltaTime;
+
+[numthreads(8, 8, 1)]
+void FillResultTextures(uint3 id : SV_DispatchThreadID) {
+	
+	Disp[id.xy] = float3(Lambda * Dxdz[id.xy].x, DyDxz[id.xy].x, Lambda * Dxdz[id.xy].y);
+	Deriv[id.xy] = float4(DyxDyz[id.xy], DxxDzz[id.xy] * Lambda);
+
+	float jac = (1 + Lambda * DxxDzz[id.xy].x) * (1 + Lambda * DxxDzz[id.xy].y) - Lambda * Lambda * DyDxz[id.xy].y * DyDxz[id.xy].y;
+	Turb[id.xy] = Turb[id.xy].r + DeltaTime * 0.5 / max(jac, 0.5);
+	Turb[id.xy] = min(jac, Turb[id.xy].r);
+}
+
+
+
+

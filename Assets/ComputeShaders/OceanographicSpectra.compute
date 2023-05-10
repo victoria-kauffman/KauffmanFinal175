@@ -1,0 +1,166 @@
+﻿#pragma kernel getH0k
+#pragma kernel getH0
+
+static const float PI = 3.1415926;
+
+RWTexture2D<float4> H0;
+// wave vector x, 1 / magnitude, wave vector z, frequency
+RWTexture2D<float4> WavesData;
+RWTexture2D<float2> H0K;
+
+Texture2D<float2> Noise;
+uint Size;
+float LengthScale;
+float MaxVal;
+float MinVal;
+float Gravity;
+float Depth;
+
+struct SpectrumParameters {
+	float scale;
+	float spreadBlend;
+	float alpha;
+	float peakOmega;
+	float gamma;
+	float shortWavesFade;
+};
+
+StructuredBuffer<SpectrumParameters> Specs;
+
+// Horvath, Page 31
+float lambdaF(float k) {
+    return 2 * PI / k;
+}
+
+// Horvath, Page 33
+float omegaHF(float omega, float h, float g) {
+    return omega * sqrt(h / g);
+}
+
+
+// https://en.wikipedia.org/wiki/Dispersion_(water_waves)#:~:text=and%20h%20)-,dispersion%20relation,-%CE%A9
+float dispersionOmega(float k, float g, float h) {
+    // h is the Depth
+    float lambda = lambdaF(k);
+
+    return (h > 0.5 * lambda) ? sqrt(g * k)
+            : (h < 0.05 * lambda) ? k * sqrt(g * h)
+            : sqrt(g * k * tanh(k * h));
+}
+
+float dispersionOmegaDeriv(float k, float g, float h) {
+    float lambda = lambdaF(k);
+
+    if (h > 0.5 * lambda) {
+        return g / (2 * sqrt(g * k));
+    } else if (h < 0.5 * lambda) {
+        return sqrt(g * h);
+    } else {
+        float omega = dispersionOmega(g, k, h);
+        float sech = 1.0 / cosh(h * k);
+
+        return 0.5 / omega * g * (tanh(h * k) + h * k * sech * sech);
+    }
+}
+
+
+// ------- Donelan-Banner -------
+// Horvath, Page 35
+float DonelanBannerBeta(float omega, float omegaP) {
+    float omegaFrac = abs(omega / omegaP);
+    return (omegaFrac < 0.95) ? 2.61 * pow(omegaFrac, 1.3)
+                              : (omegaFrac < 1.6) ? 2.28 * pow(omegaFrac, -1.3)
+                              : pow(10, -0.4 + 0.8393 * exp(-0.567 * log(omegaFrac * omegaFrac)));
+}
+
+
+float DonelanBanner(float theta, float omega, float omegaP) {
+    float beta = DonelanBannerBeta(omega, omegaP);
+    float sech = 1 / cosh(beta * theta);
+    return beta / (2 * tanh(beta * PI)) * sech * sech;
+}
+// ------------------------------
+
+// Horvath, Page 34
+float positiveCosSquared(float theta) {
+    return (theta < PI / 2 && theta > -PI / 2) ? 2 / PI * cos(theta) * cos(theta) : 0;
+}
+
+// Horvath, Page 35
+float directionalSpec(float theta, float omega, SpectrumParameters pars) {
+	return lerp(positiveCosSquared(theta), DonelanBanner(theta, omega, pars.peakOmega), pars.spreadBlend);
+}
+
+// Horvath, Page 33
+float phi(float omega, float h, float g) {
+    float omegaH = omegaHF(omega, h, g) ;
+    return (omegaH <= 1) ? 0.5 * pow(omegaH, 2) 
+            : (omegaH < 2) ? 1 - 0.5 * pow(2 - omegaH, 2)
+            : 2.2;
+}
+
+
+// ---------- JONSWAP ----------
+// All of JONSWAP is Horvath, Page 33
+float JONSWAPr(float omega, float omegaP, float sigma) {
+    return exp(- 0.5f * pow( (omega - omegaP) / (sigma * omegaP), 2));
+}
+
+float JONSWAPsigma(float omega, float omegaP) {
+    return (omega <= omegaP) ? 0.07 : 0.09;
+}
+
+
+float JONSWAPSpec(float omega, float g, float depth, SpectrumParameters pars) {
+	float sigma = JONSWAPsigma(omega, pars.peakOmega);
+	float r = JONSWAPr(omega, pars.peakOmega, sigma);
+
+	return pars.alpha * g * g
+			/ pow(omega, 5) 
+			* exp(-1.25 * pow(pars.peakOmega / omega, 4))
+			* pow(abs(pars.gamma), r);
+}
+// -----------------------------
+
+float TMASpec(float omega, float g, float h, SpectrumParameters pars) {
+    return pars.scale * phi(omega, h, g) * JONSWAPSpec(omega, g, h, pars);
+}
+
+
+float ShortWavesFade(float k, SpectrumParameters pars) {
+	return exp(-pars.shortWavesFade * pars.shortWavesFade * k * k);
+}
+
+[numthreads(8, 8, 1)]
+void getH0k(uint3 id : SV_DispatchThreadID) {
+	float deltaK = 2 * PI / LengthScale;
+	int x = id.x - Size / 2;
+	int z = id.y - Size / 2;
+	float2 k = float2(x, z) * deltaK;
+	float kLength = length(k);
+	
+	if (kLength <= MaxVal && kLength >= MinVal) {
+		float kAngle = atan2(k.y, k.x);
+		float omega = dispersionOmega(kLength, Gravity, Depth);
+		WavesData[id.xy] = float4(k.x, 1 / kLength, k.y, omega);
+		float dOmegadk = dispersionOmegaDeriv(kLength, Gravity, Depth);
+
+		float spectrum = TMASpec(omega, Gravity, Depth, Specs[0])
+			* directionalSpec(kAngle, omega, Specs[0]) * ShortWavesFade(kLength, Specs[0]);
+		if (Specs[1].scale > 0)
+			spectrum += TMASpec(omega, Gravity, Depth, Specs[1])
+			* directionalSpec(kAngle, omega, Specs[1]) * ShortWavesFade(kLength, Specs[1]);
+		H0K[id.xy] = float2(Noise[id.xy].x, Noise[id.xy].y)
+			* sqrt(2 * spectrum * abs(dOmegadk) / kLength * deltaK * deltaK);
+	} else {
+		H0K[id.xy] = 0;
+		WavesData[id.xy] = float4(k.x, 1, k.y, 0);
+	}
+}
+
+[numthreads(8,8,1)]
+void getH0(uint3 id : SV_DispatchThreadID) {
+	float2 h0K = H0K[id.xy];
+	float2 h0MinusK = H0K[uint2((Size - id.x) % Size, (Size - id.y) % Size)];
+	H0[id.xy] = float4(h0K.x, h0K.y, h0MinusK.x, -h0MinusK.y);
+}

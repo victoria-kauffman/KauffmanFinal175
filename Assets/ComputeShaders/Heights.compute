@@ -1,0 +1,45 @@
+﻿#pragma kernel CalculateAmplitudes
+
+#include "Assets/ComputeShaders/Math/Functions.cginc"
+
+RWTexture2D<float2> Dxdz;
+RWTexture2D<float2> DyDxz;
+RWTexture2D<float2> DyxDyz;
+RWTexture2D<float2> DxxDzz;
+
+Texture2D<float4> H0;
+// wave vector x, 1 / magnitude, wave vector z, frequency
+Texture2D<float4> WavesData;
+float Time;
+
+[numthreads(8,8,1)]
+void CalculateAmplitudes(uint3 id : SV_DispatchThreadID) {
+	float4 wave = WavesData[id.xy];
+
+    float wt = wave.w * Time;
+    float2 expon = float2(cos(wt), sin(wt));
+
+    float2 res = cmult(H0[id.xy].xy, expon) + cmult(H0[id.xy].zw, float2(expon.x, -expon.y));
+    float2 ires = float2(-1 * res.y, res.x);
+
+    float2 wavexy = wave.x * wave.y;
+    float2 wavezy = wave.z * wave.y;
+
+
+    float2 disX = ires * wavexy;
+    float2 disY = res;
+    float2 disZ = ires * wavezy;
+
+    float2 disXdx = -res * wave.x * wavexy;
+    float2 disYdx = ires * wave.x;
+    float2 disZdx = -res * wave.x * wavezy;
+
+    float2 disYdz = ires * wave.z;
+    float2 disZdz = -res * wave.z * wavezy;
+
+    Dxdz[id.xy] = float2(disX.x - disZ.y, disX.y + disZ.x);
+    DyDxz[id.xy] = float2(disY.x - disZdx.y, disY.y + disZdx.x);
+    DyxDyz[id.xy] = float2(disYdx.x - disYdz.y, disYdx.y + disYdz.x);
+    DxxDzz[id.xy] = float2(disXdx.x - disZdz.y, disXdx.y + disZdz.x);
+}
+
